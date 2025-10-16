@@ -3,6 +3,10 @@ plugins {
     id 'org.jetbrains.kotlin.android'
 }
 
+kotlin {
+    jvmToolchain(8)
+}
+
 android {
     namespace 'com.example.repeater'
     compileSdk 34
