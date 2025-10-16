@@ -14,6 +14,10 @@ import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 import java.text.SimpleDateFormat
@@ -24,6 +28,7 @@ class MainActivity : AppCompatActivity() {
 
     private var recorder: MediaRecorder? = null
     private var player: MediaPlayer? = null
+    private var isRecording = false
 
     private lateinit var btnRecord: Button
     private lateinit var btnPlay: Button
@@ -51,7 +56,13 @@ class MainActivity : AppCompatActivity() {
         tempFile = File(cacheDir, "temp_recording.m4a")
         if (tempFile.exists()) tempFile.delete()
 
-        btnRecord.setOnClickListener { onRecord() }
+        btnRecord.setOnClickListener {
+            if (isRecording) {
+                stopRecording()
+            } else {
+                startRecording()
+            }
+        }
         btnPlay.setOnClickListener { onPlay() }
         btnSave.setOnClickListener { onSave() }
 
@@ -65,9 +76,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun onRecord() {
+    private fun startRecording() {
         stopPlaying()
-        stopRecording() // in case
 
         // auto-delete previous temp
         if (tempFile.exists()) {
@@ -77,37 +87,34 @@ class MainActivity : AppCompatActivity() {
         recorder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             MediaRecorder(this)
         } else {
+            @Suppress("DEPRECATION")
             MediaRecorder()
         }
 
-        try {
-            recorder?.apply {
-                setAudioSource(MediaRecorder.AudioSource.MIC)
-                setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-                setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-                setAudioEncodingBitRate(128000)
-                setAudioSamplingRate(44100)
-                setOutputFile(tempFile.absolutePath)
-                prepare()
-                start()
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    recorder?.apply {
+                        setAudioSource(MediaRecorder.AudioSource.MIC)
+                        setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
+                        setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
+                        setAudioEncodingBitRate(128000)
+                        setAudioSamplingRate(44100)
+                        setOutputFile(tempFile.absolutePath)
+                        prepare()
+                        start()
+                    }
+                }
+                isRecording = true
+                status("Recording…")
+                btnRecord.text = "Stop"
+                btnPlay.isEnabled = false
+                btnSave.isEnabled = false
+            } catch (e: IOException) {
+                status("Recorder error: ${e.message}")
+                recorder?.release()
+                recorder = null
             }
-            status("Recording… (tap Play to listen, Save to keep; pressing Record again will overwrite)")
-            btnRecord.isEnabled = false
-            btnPlay.isEnabled = false
-            btnSave.isEnabled = false
-
-            // Re-enable after a short delay? No, user decides when to stop by pressing Play? 
-            // Requirement: tap Record starts recording; tap Play plays last recording.
-            // But we need a stop. We'll auto-stop when Play or Save is pressed, or 
-            // user taps Record again (overwrite). For simplicity, add a short press/hold behavior:
-            // We'll change Record into "Record (hold)"? Instead, provide a second tap to stop via Play or Save.
-
-            // To make it explicit, change text:
-            btnRecord.text = "Recording… Tap again to overwrite later"
-        } catch (e: IOException) {
-            status("Recorder error: ${e.message}")
-            recorder?.release()
-            recorder = null
         }
     }
 
@@ -121,15 +128,15 @@ class MainActivity : AppCompatActivity() {
             release()
         }
         recorder = null
+        isRecording = false
+        status("Recording stopped.")
         btnRecord.text = "Record"
-        btnRecord.isEnabled = true
         btnPlay.isEnabled = true
         btnSave.isEnabled = true
     }
 
     private fun onPlay() {
-        // Stop recording and finalize temp, then play it
-        if (recorder != null) {
+        if (isRecording) {
             stopRecording()
         }
         if (!tempFile.exists()) {
@@ -138,18 +145,22 @@ class MainActivity : AppCompatActivity() {
         }
 
         stopPlaying()
-        player = MediaPlayer().apply {
+        player = MediaPlayer()
+        lifecycleScope.launch {
             try {
-                setDataSource(tempFile.absolutePath)
-                prepare()
-                start()
-                setOnCompletionListener {
+                withContext(Dispatchers.IO) {
+                    player?.setDataSource(tempFile.absolutePath)
+                    player?.prepare()
+                }
+                player?.start()
+                player?.setOnCompletionListener {
                     stopPlaying()
                     status("Played")
                 }
                 status("Playing…")
             } catch (e: Exception) {
                 status("Player error: ${e.message}")
+                stopPlaying()
             }
         }
     }
@@ -160,8 +171,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun onSave() {
-        // Stop recording and persist via MediaStore to Music/Repeater
-        if (recorder != null) {
+        if (isRecording) {
             stopRecording()
         }
         if (!tempFile.exists()) {
@@ -186,16 +196,20 @@ class MainActivity : AppCompatActivity() {
             return
         }
 
-        try {
-            resolver.openOutputStream(itemUri)?.use { out ->
-                tempFile.inputStream().use { it.copyTo(out) }
+        lifecycleScope.launch {
+            try {
+                withContext(Dispatchers.IO) {
+                    resolver.openOutputStream(itemUri)?.use { out ->
+                        tempFile.inputStream().use { it.copyTo(out) }
+                    }
+                    values.clear()
+                    values.put(MediaStore.Audio.Media.IS_PENDING, 0)
+                    resolver.update(itemUri, values, null, null)
+                }
+                status("Saved to Music/Repeater/$name")
+            } catch (e: Exception) {
+                status("Save error: ${e.message}")
             }
-            values.clear()
-            values.put(MediaStore.Audio.Media.IS_PENDING, 0)
-            resolver.update(itemUri, values, null, null)
-            status("Saved to Music/Repeater/$name")
-        } catch (e: Exception) {
-            status("Save error: ${e.message}")
         }
     }
 
